@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -179,7 +179,7 @@ def _insert_demo_memories(connection: sqlite3.Connection) -> None:
                 json.dumps(memory["tags"]),
                 json.dumps(memory["people"]),
                 int(memory["favorite"]),
-                datetime.utcnow().isoformat(timespec="seconds"),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
             ),
         )
         connection.execute(
@@ -279,8 +279,8 @@ def create_memory(
     favorite: bool,
     photos: list[dict[str, Any]],
 ) -> str:
-    memory_id = f"memory-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
-    created_at = datetime.utcnow().isoformat(timespec="seconds")
+    memory_id = f"memory-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect() as connection:
         connection.execute(
             """INSERT INTO memories
@@ -327,7 +327,7 @@ def delete_memory(memory_id: str) -> None:
 def create_capsule(
     *, title: str, message: str, unlock_date: date, memory_id: str | None
 ) -> str:
-    capsule_id = f"capsule-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    capsule_id = f"capsule-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
     cover_data = None
     cover_url = ""
     if memory_id:
@@ -352,7 +352,7 @@ def create_capsule(
                 memory_id,
                 cover_data,
                 cover_url,
-                datetime.utcnow().isoformat(timespec="seconds"),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
             ),
         )
     return capsule_id

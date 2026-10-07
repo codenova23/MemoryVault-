@@ -2,6 +2,8 @@
 
 Memory Vault is a local-first photo memory app built with Streamlit and SQLite. Upload photos, group them into memory chapters, search by people/places/tags, favorite moments, generate a story locally, and leave date-locked notes for your future self.
 
+The interface uses a kawaii scrapbook visual system with pastel accents, photo-first memory cards, interactive category collections, and a **Surprise me** memory reveal.
+
 ## Run locally
 
 ```bash
@@ -12,6 +14,12 @@ streamlit run app.py
 ```
 
 On Windows, activate the environment with `.venv\\Scripts\\activate`.
+
+Run the built-in test suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 The SQLite database is created at `data/memory_vault.sqlite3`. Override the path with `MEMORY_VAULT_DB` if needed. Five demo memories are seeded on first run; remove or restore them from **Privacy**.
 
@@ -35,3 +43,13 @@ The SQLite file is local to the app process. Streamlit Community Cloud may reset
 - Photos are resized and compressed before their bytes are stored in SQLite. Sample cover photography is loaded from Unsplash.
 - Story generation and search matching run in Python without an external AI API.
 - The app does not encrypt the database or provide remote backups. Restrict deployment access and keep backups for personal data.
+
+## Project map
+
+- `app.py` — Streamlit page routing, forms, and interaction flows.
+- `database.py` — SQLite schema, repository operations, seed data, and capsule persistence.
+- `memory_vault/services.py` — deterministic story generation, smart search matching, and title/tag helpers.
+- `memory_vault/media.py` — EXIF-aware image orientation and upload compression.
+- `assets/memory-vault.css` — responsive kawaii scrapbook theme.
+- `tests/` — unit coverage for service behavior and database flows.
+- `.streamlit/config.toml` — app theme and upload limits.

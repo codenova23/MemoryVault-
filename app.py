@@ -2,26 +2,30 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import hmac
-import io
 import json
 import os
-import re
+import random
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image
 
 import database
+from memory_vault.media import compress_upload
+from memory_vault.services import create_story, parse_list, search_score, suggest_title
 
+LOGO_PATH = Path(__file__).parent / "logo.png"
+SHIELD_SVG = '<svg class="mv-inline-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><path d="m9 12 2 2 4-4"/></svg>'
+LOCK_SVG = '<svg class="mv-inline-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>'
 
 st.set_page_config(
     page_title="Memory Vault | Preserve Moments. Relive Stories.",
-    page_icon="🗝️",
+    page_icon=Image.open(LOGO_PATH),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -36,32 +40,6 @@ CATEGORIES = [
     "Food",
     "Special Moments",
 ]
-CATEGORY_ICONS = {
-    "Friends": "♡",
-    "Family": "⌂",
-    "College": "✳",
-    "Travel": "↗",
-    "Celebrations": "✦",
-    "Nature": "☼",
-    "Food": "◌",
-    "Special Moments": "✧",
-}
-SYNONYMS = {
-    "sunset": {"sunset", "sunrise", "golden", "evening", "sky", "dusk", "apricot"},
-    "friend": {"friend", "friends", "bestie", "group", "crew", "college", "selfie"},
-    "beach": {"beach", "sea", "water", "shore", "ocean", "goa"},
-    "family": {"family", "home", "parents", "sunday"},
-    "college": {"college", "campus", "class", "friends"},
-    "happy": {"happy", "birthday", "celebration", "laugh", "smile", "friends", "family"},
-    "happiest": {"happy", "birthday", "celebration", "laugh", "smile", "friends", "family"},
-    "food": {"food", "lunch", "dinner", "restaurant", "meal", "coffee", "cake"},
-    "travel": {"travel", "trip", "goa", "beach", "vacation", "holiday"},
-}
-STOP_WORDS = {
-    "show", "find", "with", "that", "this", "photos", "photo", "memories",
-    "memory", "me", "my", "the", "and", "for", "from", "what", "did", "i",
-}
-
 
 def apply_styles() -> None:
     st.markdown(
@@ -128,6 +106,9 @@ def apply_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
+    style_path = Path(__file__).parent / "assets" / "memory-vault.css"
+    if style_path.exists():
+        st.markdown(f"<style>{style_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 
 def configured_password() -> str:
@@ -144,7 +125,7 @@ def require_access() -> bool:
         return True
     if st.session_state.get("authenticated"):
         return True
-    st.markdown('<div class="mv-brand"><span class="mv-brand-mark">✦</span><span>MEMORY VAULT<small>YOUR LIFE, LOVINGLY KEPT</small></span></div>', unsafe_allow_html=True)
+    st.image(str(LOGO_PATH), width=218)
     st.markdown('<div class="mv-eyebrow">A PRIVATE MEMORY SPACE</div>', unsafe_allow_html=True)
     st.title("Welcome back to your vault.")
     entered = st.text_input("Vault password", type="password")
@@ -158,15 +139,6 @@ def require_access() -> bool:
     return False
 
 
-def image_bytes(uploaded_file: Any) -> bytes:
-    image = Image.open(uploaded_file)
-    image = ImageOps.exif_transpose(image).convert("RGB")
-    image.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-    output = io.BytesIO()
-    image.save(output, format="JPEG", quality=82, optimize=True)
-    return output.getvalue()
-
-
 def image_source(photo: dict[str, Any]) -> bytes | str | None:
     return photo.get("photo_data") or photo.get("photo_url") or None
 
@@ -174,77 +146,6 @@ def image_source(photo: dict[str, Any]) -> bytes | str | None:
 def image_for_memory(memory: dict[str, Any]) -> bytes | str | None:
     photos = memory.get("photos") or []
     return image_source(photos[0]) if photos else None
-
-
-def suggest_title(filenames: list[str], category: str, location: str) -> str:
-    stems = [re.sub(r"\.[^.]+$", "", name).replace("_", " ").replace("-", " ") for name in filenames]
-    useful = [re.sub(r"\b(IMG|DSC|PXL|PHOTO)\s*\d+\b", "", stem, flags=re.I).strip() for stem in stems]
-    useful = [name for name in useful if name and not re.fullmatch(r"\d+", name)]
-    if useful:
-        label = re.sub(r"\s+", " ", useful[0]).strip().title()
-        if len(label) > 42:
-            label = label[:39].rstrip() + "..."
-        return label
-    if location:
-        return f"A little time in {location}"
-    month = date.today().strftime("%B")
-    return f"{category} in {month}"
-
-
-def parse_list(value: str) -> list[str]:
-    return list(dict.fromkeys(item.strip() for item in re.split(r"[,\n]", value) if item.strip()))[:12]
-
-
-def photo_time(index: int) -> str:
-    moment = datetime.now().replace(hour=10, minute=30, second=0, microsecond=0) + timedelta(minutes=74 * index)
-    return moment.strftime("%-I:%M %p")
-
-
-def create_story(memories: list[dict[str, Any]]) -> dict[str, Any]:
-    ordered = sorted(memories, key=lambda item: item["date"])
-    first, last = ordered[0], ordered[-1]
-    places = list(dict.fromkeys(item["location"] for item in ordered if item["location"]))
-    people = list(dict.fromkeys(person for item in ordered for person in item["people"]))[:5]
-    moments = [
-        item["description"].strip().rstrip(".!?")
-        for item in ordered
-        if item["description"].strip()
-    ]
-    paragraphs = [
-        f"It began with {first['title'].lower()}, back in {date.fromisoformat(first['date']).strftime('%B %Y')}. Somewhere along the way, {len(ordered)} little chapters started to feel like one bigger story.",
-        (". ".join(moments[:3]) + ". Each one holds onto a detail an ordinary camera roll might have let slip away.")
-        if moments
-        else "There are places you return to, people who make an ordinary day brighter, and small details worth finding again.",
-        f"Across {', '.join(places[:3]) if places else 'the places that feel like yours'}{', with ' + ', '.join(people) if people else ''}, the days have made room for laughter, change, and the quiet things that matter. {last['title']} is only the latest page; the best part is that the story is still yours to keep.",
-    ]
-    return {"title": "The little things that became everything", "paragraphs": paragraphs}
-
-
-def search_score(memory: dict[str, Any], query: str) -> int:
-    normalized = query.lower().strip()
-    terms = [word for word in re.findall(r"[\w'-]+", normalized) if len(word) > 2 and word not in STOP_WORDS]
-    expanded: set[str] = set()
-    for term in terms:
-        expanded.update(SYNONYMS.get(term, {term}))
-    if not expanded:
-        expanded.add(normalized)
-    date_label = date.fromisoformat(memory["date"]).strftime("%B %Y").lower()
-    main_text = " ".join(
-        [memory["title"], memory["location"], memory["description"], memory["category"], date_label]
-        + memory["tags"]
-        + memory["people"]
-    ).lower()
-    photo_text = " ".join(
-        f"{photo.get('caption', '')} {photo.get('captured_at', '')}"
-        for photo in memory.get("photos", [])
-    ).lower()
-    score = 0
-    for term in expanded:
-        if term in photo_text:
-            score += 3
-        elif term in main_text:
-            score += 2
-    return score
 
 
 def memory_card(memory: dict[str, Any], key_suffix: str = "") -> None:
@@ -266,7 +167,7 @@ def memory_card(memory: dict[str, Any], key_suffix: str = "") -> None:
         if first.button("Open memory", key=f"open-{memory['id']}-{key_suffix}", width="stretch"):
             st.session_state.selected_memory_id = memory["id"]
             st.rerun()
-        favorite_label = "♥ Saved" if memory["favorite"] else "♡ Favorite"
+        favorite_label = "Remove favorite" if memory["favorite"] else "Mark favorite"
         if second.button(favorite_label, key=f"favorite-{memory['id']}-{key_suffix}", width="stretch"):
             database.set_favorite(memory["id"], not memory["favorite"])
             st.rerun()
@@ -283,13 +184,19 @@ def render_dashboard() -> None:
     memories = database.list_memories()
     favorites = [memory for memory in memories if memory["favorite"]]
     capsules = database.list_capsules()
-    st.markdown(
-        """<section class="mv-hero"><div class="mv-eyebrow">YOUR LIFE, LOVINGLY KEPT</div>
-        <h1>Preserve Moments.<br><em>Relive Stories.</em></h1>
-        <p>Your best memories deserve more than a camera roll. Give every moment a place, a little context, and a way back.</p>
-        <div class="mv-hero-note">Private by nature · A little story behind every photo</div></section>""",
-        unsafe_allow_html=True,
-    )
+    hero_copy, hero_brand = st.columns([1.8, 1], gap="medium", vertical_alignment="center")
+    with hero_copy:
+        st.markdown(
+            """<section class="mv-hero"><div class="mv-eyebrow">YOUR LIFE, LOVINGLY KEPT</div>
+            <h1>Preserve Moments.<br><em>Relive Stories.</em></h1>
+            <p>Your best memories deserve more than a camera roll. Give every moment a place, a little context, and a way back.</p>
+            <div class="mv-hero-note">Private by nature · A little story behind every photo</div></section>""",
+            unsafe_allow_html=True,
+        )
+    with hero_brand:
+        with st.container(border=True):
+            st.image(str(LOGO_PATH), width=235)
+            st.caption("A home for the moments that matter.")
     st.write("")
     first, second, third = st.columns(3)
     first.metric("Memories saved", len(memories), help="All the little chapters in your vault")
@@ -354,7 +261,31 @@ def render_dashboard() -> None:
     category_columns = st.columns(4)
     for index, category in enumerate(CATEGORIES):
         with category_columns[index % len(category_columns)]:
-            st.markdown(f"**{CATEGORY_ICONS[category]}  {category}**  \n{counts[category]} {'memory' if counts[category] == 1 else 'memories'}")
+            if st.button(
+                f"{category} · {counts[category]}",
+                key=f"dashboard-category-{category}",
+                width="stretch",
+                on_click=lambda selected=category: (
+                    setattr(st.session_state, "view", "Timeline"),
+                    setattr(st.session_state, "timeline_category", selected),
+                ),
+            ):
+                pass
+
+
+def render_favorites() -> None:
+    section_heading("THE ONES YOU KEEP CLOSE", "Favorite moments", "The little memories you chose to tuck a bit closer.")
+    favorites = database.list_memories(favorites_only=True)
+    if not favorites:
+        st.info("No favorites just yet. Tap the heart on a memory when it feels like one to keep close.")
+        if st.button("Explore memories", type="primary"):
+            st.session_state.view = "Timeline"
+            st.rerun()
+        return
+    columns = st.columns(min(3, len(favorites)), gap="medium")
+    for index, memory in enumerate(favorites):
+        with columns[index % len(columns)]:
+            memory_card(memory, "favorites")
 
 
 def render_add_memory() -> None:
@@ -409,7 +340,7 @@ def render_add_memory() -> None:
         with st.spinner("Gathering the little details…"):
             try:
                 photos = [
-                    {"data": image_bytes(uploaded), "caption": uploaded.name, "time": photo_time(index)}
+                    {"data": compress_upload(uploaded), "caption": uploaded.name, "time": datetime.now().strftime("%I:%M %p")}
                     for index, uploaded in enumerate(uploads)
                 ]
                 memory_id = database.create_memory(
@@ -529,10 +460,10 @@ def render_memory_detail(memory_id: str) -> None:
         st.markdown(f"**{captured}**　{caption}")
 
     favorite_col, capsule_col, delete_col = st.columns(3)
-    if favorite_col.button("♥ Remove favorite" if memory["favorite"] else "♡ Add favorite", width="stretch"):
+    if favorite_col.button("Remove favorite" if memory["favorite"] else "Add favorite", width="stretch"):
         database.set_favorite(memory_id, not memory["favorite"])
         st.rerun()
-    if capsule_col.button("🔒 Save as capsule", width="stretch"):
+    if capsule_col.button("Save as capsule", width="stretch"):
         st.session_state.capsule_memory_id = memory_id
         st.session_state.view = "Memory capsules"
         st.rerun()
@@ -561,7 +492,7 @@ def render_story() -> None:
             st.session_state.view = "Add memory"
             st.rerun()
         return
-    if st.button("✨ Create My Story", type="primary"):
+    if st.button("Create My Story", type="primary"):
         story = create_story(memories)
         database.set_setting("generated_story", json.dumps(story))
         st.session_state.generated_story = story
@@ -586,7 +517,7 @@ def render_story() -> None:
 
 def render_capsules() -> None:
     st.markdown(
-        """<section class="mv-hero"><div class="mv-eyebrow">🔒 A NOTE FROM NOW, FOR LATER</div>
+        f"""<section class="mv-hero"><div class="mv-eyebrow">{LOCK_SVG}<span>A NOTE FROM NOW, FOR LATER</span></div>
         <h1>Leave a little <em>something.</em></h1>
         <p>Choose a future day, write yourself a note, and let a memory wait quietly until then.</p></section>""",
         unsafe_allow_html=True,
@@ -600,7 +531,7 @@ def render_capsules() -> None:
             options = {"No attached memory": None}
             options.update({memory["title"]: memory["id"] for memory in memories})
             selected_label = st.selectbox("Attach a memory", list(options), index=next((index for index, key in enumerate(options) if options[key] == st.session_state.get("capsule_memory_id")), 0))
-            submitted = st.form_submit_button("🔒 Tuck it away", type="primary")
+            submitted = st.form_submit_button("Tuck it away", type="primary")
         if submitted:
             if not title.strip() or not message.strip():
                 st.error("Add a title and a note before saving your capsule.")
@@ -624,7 +555,7 @@ def render_capsules() -> None:
         return
     for capsule in capsules:
         unlocked = date.fromisoformat(capsule["unlock_date"]) <= date.today()
-        label = f"{'🔓 Ready to open' if unlocked else '🔒 Still tucked away'} · {capsule['title']} · {date.fromisoformat(capsule['unlock_date']).strftime('%B %-d, %Y')}"
+        label = f"{'Ready to open' if unlocked else 'Locked until'} · {capsule['title']} · {date.fromisoformat(capsule['unlock_date']).strftime('%B %-d, %Y')}"
         with st.expander(label):
             photo = capsule["cover_data"] or capsule["cover_url"]
             if photo:
@@ -701,22 +632,20 @@ def main() -> None:
     st.session_state.setdefault("upload_nonce", 0)
     st.session_state.setdefault("selected_memory_id", None)
     with st.sidebar:
-        st.markdown(
-            '<div class="mv-brand"><span class="mv-brand-mark">✦</span><span>MEMORY VAULT<small>YOUR LIFE, LOVINGLY KEPT</small></span></div>',
-            unsafe_allow_html=True,
-        )
+        st.image(str(LOGO_PATH), width=176)
+        st.markdown('<div class="mv-sidebar-tagline">YOUR LIFE, LOVINGLY KEPT</div>', unsafe_allow_html=True)
         st.button(
-            "＋  Create a memory",
+            "Create a memory",
             type="primary",
             width="stretch",
             on_click=lambda: setattr(st.session_state, "view", "Add memory"),
         )
         st.markdown("<div style='height:13px'></div><div class='mv-eyebrow' style='color:#a69bbd'>YOUR SPACE</div>", unsafe_allow_html=True)
-        pages = ["Dashboard", "Timeline", "Memory capsules", "My story", "Privacy"]
+        pages = ["Dashboard", "Timeline", "Favorite moments", "Memory capsules", "My story", "Privacy"]
         for label in pages:
             active = st.session_state.view == label
             if st.button(
-                f"{'●' if active else '○'}  {label}",
+                label,
                 key=f"nav-{label}",
                 width="stretch",
                 type="primary" if active else "secondary",
@@ -727,7 +656,7 @@ def main() -> None:
         counts = Counter(memory["category"] for memory in database.list_memories())
         for category in CATEGORIES[:5]:
             if st.button(
-                f"{CATEGORY_ICONS[category]}  {category}   ·   {counts[category]}",
+                f"{category}   ·   {counts[category]}",
                 key=f"category-{category}",
                 width="stretch",
                 on_click=lambda selected=category: (
@@ -736,8 +665,16 @@ def main() -> None:
                 ),
             ):
                 pass
+        surprises = database.list_memories()
+        if st.button("Surprise me", key="surprise-memory", width="stretch", disabled=not surprises):
+            st.session_state.selected_memory_id = random.choice(surprises)["id"]
+            st.session_state.view = "Timeline"
+            st.rerun()
         st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
-        st.caption("🔒  Your memories stay in this database.")
+        st.markdown(
+            f'<div class="mv-sidebar-note">{SHIELD_SVG}<span>Memories stay in your database.</span></div>',
+            unsafe_allow_html=True,
+        )
         if not configured_password():
             st.warning("Set APP_PASSWORD in Streamlit secrets before sharing this app.")
 
@@ -748,6 +685,8 @@ def main() -> None:
         render_add_memory()
     elif view == "Timeline":
         render_timeline()
+    elif view == "Favorite moments":
+        render_favorites()
     elif view == "Memory capsules":
         render_capsules()
     elif view == "My story":
